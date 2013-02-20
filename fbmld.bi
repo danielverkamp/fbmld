@@ -54,7 +54,7 @@ common shared fbmld_instances as integer
 private sub fbmld_print(byref s as string)
 	fprintf(stderr, "(FBMLD) " & s & chr(10))
 end sub
- 
+
 private sub fbmld_mutexlock( )
 #ifndef FBMLD_NO_MULTITHREADING
 	mutexlock(fbmld_mutex)
@@ -67,7 +67,7 @@ private sub fbmld_mutexunlock( )
 #endif
 end sub
 
- 
+
 private function new_node _
 	( _
 		byval pt      as any ptr, _
@@ -84,11 +84,11 @@ private function new_node _
 	node->linenum = linenum
 	node->left = NULL
 	node->right = NULL
-	
+
 	function = node
 
 end function
- 
+
 private sub free_node _
 	( _
 		byval node as fbmld_t ptr _
@@ -107,13 +107,13 @@ private function fbmld_search _
 
 	dim as fbmld_t ptr ptr node = root
 	dim as any ptr a = pt, b = any
-	
+
 	asm
 		mov eax, dword ptr [a]
 		bswap eax
 		mov dword ptr [a], eax
 	end asm
-	
+
 	while *node <> NULL
 		b = (*node)->pt
 		asm
@@ -129,7 +129,7 @@ private function fbmld_search _
 			exit while
 		end if
 	wend
-	
+
 	function = node
 
 end function
@@ -222,32 +222,32 @@ private sub fbmld_exit _
 	) destructor 101
 
 	fbmld_instances -= 1
-	
+
 	if fbmld_instances = 0 then
-		
+
 		if fbmld_tree <> NULL then
 			fbmld_print("---- memory leaks ----")
 			fbmld_tree_clean(@fbmld_tree)
 		else
 			fbmld_print("all memory deallocated")
 		end if
-		
+
 #ifndef FBMLD_NO_MULTITHREADING
 		if fbmld_mutex <> 0 then
 			mutexdestroy(fbmld_mutex)
 			fbmld_mutex = 0
 		end if
 #endif
-	
+
 	end if
 
 end sub
 
 private function fbmld_allocate(byval bytes as uinteger, byref file as string, byval linenum as integer) as any ptr
 	dim ret as any ptr = any
-	
+
 	fbmld_mutexlock()
-	
+
 	if bytes = 0 then
 		fbmld_print("warning: allocate(0) called at " & file & ":" & linenum & "; returning NULL")
 		ret = 0
@@ -255,17 +255,17 @@ private function fbmld_allocate(byval bytes as uinteger, byref file as string, b
 		ret = malloc(bytes)
 		fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
 	end if
-	
+
 	fbmld_mutexunlock()
-	
+
 	return ret
 end function
 
 private function fbmld_callocate(byval bytes as uinteger, byref file as string, byval linenum as integer) as any ptr
 	dim ret as any ptr = any
-	
+
 	fbmld_mutexlock()
-	
+
 	if bytes = 0 then
 		fbmld_print("warning: callocate(0) called at " & file & ":" & linenum & "; returning NULL")
 		ret = 0
@@ -273,20 +273,20 @@ private function fbmld_callocate(byval bytes as uinteger, byref file as string, 
 		ret = calloc(1, bytes)
 		fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
 	end if
-	
+
 	fbmld_mutexunlock()
-	
+
 	return ret
 end function
 
 private function fbmld_reallocate(byval pt as any ptr, byval bytes as uinteger, byref file as string, byval linenum as integer, byref varname as string) as any ptr
 	dim ret as any ptr = any
 	dim node as fbmld_t ptr ptr = any
-	
+
 	fbmld_mutexlock()
-	
+
 	node = fbmld_search(@fbmld_tree, pt)
-	
+
 	if pt = NULL then
 		if bytes = 0 then
 			fbmld_print("error: reallocate(" & varname & " [NULL] , 0) called at " & file & ":" & linenum)
@@ -305,7 +305,7 @@ private function fbmld_reallocate(byval pt as any ptr, byval bytes as uinteger, 
 		ret = NULL
 	else
 		ret = realloc(pt, bytes)
-		
+
 		if ret = pt then
 			(*node)->bytes = bytes
 			(*node)->file = file
@@ -315,22 +315,22 @@ private function fbmld_reallocate(byval pt as any ptr, byval bytes as uinteger, 
 			fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
 		end if
 	end if
-	
+
 	fbmld_mutexunlock()
-	
+
 	return ret
 end function
 
 private sub fbmld_deallocate(byval pt as any ptr, byref file as string, byval linenum as integer, byref varname as string)
 	dim node as fbmld_t ptr ptr
-	
+
 	fbmld_mutexlock()
-	
+
 	if pt = NULL then
 		fbmld_print("warning: deallocate(" & varname & " [NULL] ) at " & file & ":" & linenum)
 	else
 		node = fbmld_search(@fbmld_tree, pt)
-		
+
 		if *node = NULL then
 			fbmld_print("error: invalid deallocate(" & varname & " [&H" & hex(pt, 8) & "] ) at " & file & ":" & linenum)
 		else
@@ -338,7 +338,7 @@ private sub fbmld_deallocate(byval pt as any ptr, byref file as string, byval li
 			free(pt)
 		end if
 	end if
-	
+
 	fbmld_mutexunlock()
 end sub
 
