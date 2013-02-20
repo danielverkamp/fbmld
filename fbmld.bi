@@ -1,6 +1,7 @@
 ''
-'' fbmld (FB Memory Leak Detector) version 0.5
+'' fbmld (FB Memory Leak Detector) version 0.6
 '' Copyright (C) 2006 Daniel R. Verkamp
+'' Tree storage implemented by yetifoot
 ''
 '' This software is provided 'as-is', without any express or implied warranty. 
 '' In no event will the authors be held liable for any damages arising from 
@@ -34,27 +35,26 @@
 
 #define allocate(bytes) fbmld_allocate((bytes), __FILE__, __LINE__)
 #define callocate(bytes) fbmld_callocate((bytes), __FILE__, __LINE__)
-#define reallocate(pt, bytes) fbmld_reallocate((pt), (bytes), __FILE__, __LINE__)
+#define reallocate(pt, bytes) fbmld_reallocate((pt), (bytes), __FILE__, __LINE__, #pt)
 #define deallocate(pt) fbmld_deallocate((pt), __FILE__, __LINE__, #pt)
 
 type fbmld_t
-	pt as any ptr
-	bytes as uinteger
-	file as string
+	pt      as any ptr
+	bytes   as uinteger
+	file    as string
 	linenum as integer
-	_next as fbmld_t ptr
-	_prev as fbmld_t ptr
+	left    as fbmld_t ptr
+	right   as fbmld_t ptr
 end type
 
-common shared fbmld_list as fbmld_t ptr
-common shared fbmld_atexit_installed as integer
+common shared fbmld_tree as fbmld_t ptr
 common shared fbmld_mutex as any ptr
 common shared fbmld_instances as integer
 
 private sub fbmld_print(byref s as string)
 	fprintf(stderr, "(FBMLD) " & s & chr(10))
 end sub
-
+ 
 private sub fbmld_mutexlock( )
 #ifndef FBMLD_NO_MULTITHREADING
 	mutexlock(fbmld_mutex)
@@ -67,74 +67,132 @@ private sub fbmld_mutexunlock( )
 #endif
 end sub
 
-private function fbmld_find(byval pt as any ptr) as fbmld_t ptr
-	dim elem as fbmld_t ptr
+ 
+private function new_node _
+	( _
+		byval pt      as any ptr, _
+		byval bytes   as uinteger, _
+		byref file    as string, _
+		byval linenum as integer _
+	) as fbmld_t ptr
+
+	dim as fbmld_t ptr node = calloc(1, sizeof(fbmld_t))
+
+	node->pt = pt
+	node->bytes = bytes
+	node->file = file
+	node->linenum = linenum
+	node->left = NULL
+	node->right = NULL
 	
-	fbmld_mutexlock
+	function = node
+
+end function
+ 
+private sub free_node _
+	( _
+		byval node as fbmld_t ptr _
+	)
+
+	node->file = ""
+	free( node )
+
+end sub
+
+private function fbmld_search _
+	( _
+		byval root    as fbmld_t ptr ptr, _
+		byval pt      as any ptr _
+	) as fbmld_t ptr ptr
+
+	dim as fbmld_t ptr ptr node = root
+	dim as any ptr a = pt, b = any
 	
-	elem = fbmld_list
+	asm
+		mov eax, dword ptr [a]
+		bswap eax
+		mov dword ptr [a], eax
+	end asm
 	
-	do while elem <> 0
-		if elem->pt = pt then
-			fbmld_mutexunlock
-			return elem
+	while *node <> NULL
+		b = (*node)->pt
+		asm
+			mov eax, dword ptr [b]
+			bswap eax
+			mov dword ptr [b], eax
+		end asm
+		if a < b then
+			node = @(*node)->left
+		elseif a > b then
+			node = @(*node)->right
+		else
+			exit while
 		end if
-		
-		elem = elem->_next
-	loop
+	wend
 	
-	fbmld_mutexunlock
-	
-	return 0
+	function = node
+
 end function
 
-private sub fbmld_add(byval pt as any ptr, byval bytes as uinteger, byref file as string, byval linenum as integer)
-	dim elem as fbmld_t ptr
-	
-	fbmld_mutexlock
-	
-	elem = calloc(1, sizeof(fbmld_t))
-	elem->pt = pt
-	elem->bytes = bytes
-	elem->file = file
-	elem->linenum = linenum
-	elem->_next = fbmld_list
-	if fbmld_list <> 0 then
-		fbmld_list->_prev = elem
+private sub fbmld_insert _
+	( _
+		byval root    as fbmld_t ptr ptr, _
+		byval pt      as any ptr, _
+		byval bytes   as uinteger, _
+		byref file    as string, _
+		byval linenum as integer _
+	)
+
+	dim as fbmld_t ptr ptr node = fbmld_search(root, pt)
+
+	if *node = NULL then
+		*node = new_node( pt, bytes, file, linenum )
 	end if
-	fbmld_list = elem
-	
-	fbmld_mutexunlock
-	
+
 end sub
 
-private sub fbmld_remove(byval elem as fbmld_t ptr)
-	dim _next as fbmld_t ptr
-	
-	fbmld_mutexlock
-	
-	if elem->_next <> 0 then
-		elem->_next->_prev = elem->_prev
-	end if
-	
-	if elem->_prev <> 0 then
-		elem->_prev->_next = elem->_next
-	end if
-	
-	elem->file = ""
-	_next = elem->_next
-	
-	free(elem)
-	
-	if elem = fbmld_list then
-		fbmld_list = _next
-	end if
-	
-	fbmld_mutexunlock
-	
+private sub fbmld_swap _
+	( _
+		byval node1 as fbmld_t ptr ptr, _
+		byval node2 as fbmld_t ptr ptr _
+	)
+
+	swap (*node1)->pt,      (*node2)->pt
+	swap (*node1)->bytes,   (*node2)->bytes
+	swap (*node1)->file,    (*node2)->file
+	swap (*node1)->linenum, (*node2)->linenum
+
 end sub
 
-private sub fbmld_init() constructor
+private sub fbmld_delete _
+	( _
+		byval node as fbmld_t ptr ptr _
+	)
+
+	dim as fbmld_t ptr old_node = *node
+	dim as fbmld_t ptr ptr pred
+
+	if (*node)->left = NULL then
+		*node = (*node)->right
+		free_node( old_node )
+	elseif (*node)->right = NULL then
+		*node = (*node)->left
+		free_node( old_node )
+	else
+		pred = @(*node)->left
+		while (*pred)->right <> NULL
+			pred = @(*pred)->right
+		wend
+		fbmld_swap( node, pred )
+		fbmld_delete( pred )
+	end if
+
+end sub
+
+private sub fbmld_init _
+	( _
+	) constructor 101
+
 	if fbmld_instances = 0 then
 #ifndef FBMLD_NO_MULTITHREADING
 		fbmld_mutex = mutexcreate()
@@ -143,27 +201,35 @@ private sub fbmld_init() constructor
 	fbmld_instances += 1
 end sub
 
-private sub fbmld_exit() destructor
-	dim elem as fbmld_t ptr, n as fbmld_t ptr
-	
+private sub fbmld_tree_clean _
+	( _
+		byval node as fbmld_t ptr ptr _
+	)
+
+	if *node <> NULL then
+		fbmld_tree_clean( @((*node)->left) )
+		fbmld_tree_clean( @((*node)->right) )
+		fbmld_print( "error: " & (*node)->bytes & " bytes allocated at " & (*node)->file & ":" & (*node)->linenum & " [&H" & hex( (*node)->pt, 8 ) & "] not deallocated" )
+		(*node)->file = ""
+		free( (*node)->pt )
+		free( *node )
+		*node = NULL
+	end if
+end sub
+
+private sub fbmld_exit _
+	( _
+	) destructor 101
+
 	fbmld_instances -= 1
 	
 	if fbmld_instances = 0 then
 		
-		if fbmld_list <> 0 then
-			
-			elem = fbmld_list
-			fbmld_list = 0
-			
-			do while elem <> 0
-				fbmld_print(elem->bytes & " bytes allocated at " & elem->file & ":" & elem->linenum & " [&H" & hex(elem->pt) & "] not deallocated!")
-				elem->file = ""
-				n = elem->_next
-				free(elem)
-				elem = n
-			loop
+		if fbmld_tree <> NULL then
+			fbmld_print("---- memory leaks ----")
+			fbmld_tree_clean(@fbmld_tree)
 		else
-			fbmld_print("All memory deallocated")
+			fbmld_print("all memory deallocated")
 		end if
 		
 #ifndef FBMLD_NO_MULTITHREADING
@@ -172,56 +238,108 @@ private sub fbmld_exit() destructor
 			fbmld_mutex = 0
 		end if
 #endif
+	
 	end if
+
 end sub
 
 private function fbmld_allocate(byval bytes as uinteger, byref file as string, byval linenum as integer) as any ptr
-	dim ret as any ptr
+	dim ret as any ptr = any
 	
-	ret = malloc(bytes)
-	fbmld_add(ret, bytes, file, linenum)
+	fbmld_mutexlock()
+	
+	if bytes = 0 then
+		fbmld_print("warning: allocate(0) called at " & file & ":" & linenum & "; returning NULL")
+		ret = 0
+	else
+		ret = malloc(bytes)
+		fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
+	end if
+	
+	fbmld_mutexunlock()
+	
 	return ret
 end function
 
 private function fbmld_callocate(byval bytes as uinteger, byref file as string, byval linenum as integer) as any ptr
-	dim ret as any ptr
+	dim ret as any ptr = any
 	
-	ret = calloc(1, bytes)
-	fbmld_add(ret, bytes, file, linenum)
+	fbmld_mutexlock()
+	
+	if bytes = 0 then
+		fbmld_print("warning: callocate(0) called at " & file & ":" & linenum & "; returning NULL")
+		ret = 0
+	else
+		ret = calloc(1, bytes)
+		fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
+	end if
+	
+	fbmld_mutexunlock()
+	
 	return ret
 end function
 
-private function fbmld_reallocate(byval pt as any ptr, byval bytes as uinteger, byref file as string, byval linenum as integer) as any ptr
-	dim ret as any ptr
-	dim elem as fbmld_t ptr
+private function fbmld_reallocate(byval pt as any ptr, byval bytes as uinteger, byref file as string, byval linenum as integer, byref varname as string) as any ptr
+	dim ret as any ptr = any
+	dim node as fbmld_t ptr ptr = any
 	
-	ret = realloc(pt, bytes)
-	elem = fbmld_find(pt)
-	if elem = 0 then
-		fbmld_add(ret, bytes, file, linenum)
+	fbmld_mutexlock()
+	
+	node = fbmld_search(@fbmld_tree, pt)
+	
+	if pt = NULL then
+		if bytes = 0 then
+			fbmld_print("error: reallocate(" & varname & " [NULL] , 0) called at " & file & ":" & linenum)
+			ret = NULL
+		else
+			ret = malloc(bytes)
+			fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
+		end if
+	elseif *node = NULL then
+		fbmld_print("error: invalid reallocate(" & varname & " [&H" & hex(pt, 8) & "] ) at " & file & ":" & linenum)
+		ret = NULL
+	elseif bytes = 0 then
+		fbmld_print("warning: reallocate(" & varname & " [&H" & hex(pt, 8) & "] , 0) called at " & file & ":" & linenum & "; deallocating")
+		free(pt)
+		if *node <> NULL then fbmld_delete(node)
+		ret = NULL
 	else
-		elem->pt = ret
-		elem->bytes = bytes
-		elem->file = file
-		elem->linenum = linenum
+		ret = realloc(pt, bytes)
+		
+		if ret = pt then
+			(*node)->bytes = bytes
+			(*node)->file = file
+			(*node)->linenum = linenum
+		else
+			fbmld_delete(node)
+			fbmld_insert(@fbmld_tree, ret, bytes, file, linenum)
+		end if
 	end if
+	
+	fbmld_mutexunlock()
 	
 	return ret
 end function
 
 private sub fbmld_deallocate(byval pt as any ptr, byref file as string, byval linenum as integer, byref varname as string)
-	dim elem as fbmld_t ptr
+	dim node as fbmld_t ptr ptr
 	
-	if pt <> 0 then
-		elem = fbmld_find(pt)
-	end if
-	if elem = 0 then
-		fbmld_print("Invalid deallocate(" & varname & ") [&H" & hex(pt) & "] at " & file & ":" & linenum)
+	fbmld_mutexlock()
+	
+	if pt = NULL then
+		fbmld_print("warning: deallocate(" & varname & " [NULL] ) at " & file & ":" & linenum)
 	else
-		fbmld_remove(elem)
+		node = fbmld_search(@fbmld_tree, pt)
+		
+		if *node = NULL then
+			fbmld_print("error: invalid deallocate(" & varname & " [&H" & hex(pt, 8) & "] ) at " & file & ":" & linenum)
+		else
+			fbmld_delete(node)
+			free(pt)
+		end if
 	end if
 	
-	free(pt)
+	fbmld_mutexunlock()
 end sub
 
 #endif '' __FBMLD__
